@@ -1,0 +1,295 @@
+import streamlit as st
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+from datetime import datetime, timedelta
+import io
+
+# Set page configuration
+st.set_page_config(
+    page_title="Cohort Analysis Dashboard",
+    page_icon="📊",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+# Custom CSS for better styling
+st.markdown("""
+    <style>
+    .main-header {font-size: 24px; color: #1f77b4; font-weight: bold;}
+    .section-header {font-size: 20px; color: #2c3e50; font-weight: bold;}
+    .highlight {background-color: #f0f2f6; padding: 15px; border-radius: 5px;}
+    .stDataFrame {font-size: 14px;}
+    </style>
+    """, unsafe_allow_html=True)
+
+def generate_sample_data():
+    """Generate sample data if no file is uploaded"""
+    np.random.seed(42)
+    n_orders = 10000  # Smaller sample for demo
+    
+    # Generate customer IDs
+    customer_ids = [f"C{10000 + i}" for i in range(2000)]
+    
+    # Generate dates for the last 24 months
+    end_date = datetime.now()
+    start_date = end_date - timedelta(days=730)
+    date_range = pd.date_range(start=start_date, end=end_date, freq='D')
+    
+    # Create orders
+    orders = []
+    for i in range(n_orders):
+        customer_id = np.random.choice(customer_ids)
+        order_date = np.random.choice(date_range)
+        order_value = round(np.random.lognormal(mean=3.5, sigma=1.2), 2)
+        orders.append([customer_id, order_date, order_value])
+    
+    # Create DataFrame
+    df = pd.DataFrame(orders, columns=['customer_id', 'order_date', 'order_value'])
+    
+    # Calculate first order date for each customer
+    first_orders = df.groupby('customer_id')['order_date'].min().reset_index()
+    first_orders.columns = ['customer_id', 'first_order_date']
+    
+    # Merge with original data
+    df = pd.merge(df, first_orders, on='customer_id')
+    
+    return df
+
+def load_data(uploaded_file):
+    """Load data from uploaded file or generate sample data"""
+    if uploaded_file is not None:
+        try:
+            # Try reading as CSV first
+            df = pd.read_csv(uploaded_file)
+            
+            # Ensure required columns exist
+            required_cols = ['customer_id', 'order_date', 'order_value', 'first_order_date']
+            for col in required_cols:
+                if col not in df.columns:
+                    st.error(f"Column '{col}' not found in the uploaded file.")
+                    return None
+            
+            # Convert date columns
+            df['order_date'] = pd.to_datetime(df['order_date'])
+            df['first_order_date'] = pd.to_datetime(df['first_order_date'])
+            
+            return df
+            
+        except Exception as e:
+            st.error(f"Error reading file: {e}")
+            return None
+    else:
+        st.info("Using sample data. Upload a file to use your own data.")
+        return generate_sample_data()
+
+def define_campaigns():
+    """UI for defining campaign date ranges"""
+    st.sidebar.markdown("### Define Campaign Periods")
+    
+    campaigns = []
+    n_campaigns = st.sidebar.number_input("Number of campaigns", min_value=1, max_value=12, value=3)
+    
+    for i in range(n_campaigns):
+        st.sidebar.markdown(f"**Campaign {i+1}**")
+        col1, col2 = st.sidebar.columns(2)
+        with col1:
+            start = st.date_input(f"Start {i+1}", 
+                                 value=datetime.now() - timedelta(days=30*(i+2)),
+                                 key=f"start_{i}")
+        with col2:
+            end = st.date_input(f"End {i+1}", 
+                               value=datetime.now() - timedelta(days=30*(i+1)),
+                               key=f"end_{i}")
+        campaigns.append((start, end))
+    
+    return campaigns
+
+def assign_cohorts(df, campaigns):
+    """Assign cohorts based on campaign periods"""
+    # Create cohort assignment function
+    def get_cohort(first_order_date):
+        for i, (start, end) in enumerate(campaigns):
+            if pd.to_datetime(start) <= first_order_date <= pd.to_datetime(end):
+                return f"Campaign {i+1}"
+        return "Other"
+    
+    # Assign cohorts
+    df['cohort'] = df['first_order_date'].apply(get_cohort)
+    
+    # Filter out 'Other' cohort
+    df = df[df['cohort'] != 'Other']
+    
+    return df
+
+def calculate_retention(df, campaigns):
+    """Calculate retention metrics"""
+    # Create a list of all campaign periods for columns
+    campaign_periods = [f"Campaign {i+1}" for i in range(len(campaigns))]
+    
+    # Create empty dataframes for results
+    retention_rates = pd.DataFrame(index=campaign_periods, columns=campaign_periods)
+    purchase_values = pd.DataFrame(index=campaign_periods, columns=campaign_periods)
+    
+    # Calculate for each cohort
+    for i, cohort in enumerate(campaign_periods):
+        # Get customers in this cohort
+        cohort_customers = df[df['cohort'] == cohort]['customer_id'].unique()
+        cohort_size = len(cohort_customers)
+        
+        if cohort_size == 0:
+            continue
+            
+        # For each campaign period, calculate retention
+        for j, period in enumerate(campaign_periods[i:], start=i):
+            period_name = campaign_periods[j]
+            
+            # Get campaign start and end dates
+            period_start, period_end = campaigns[j]
+            period_start, period_end = pd.to_datetime(period_start), pd.to_datetime(period_end)
+            
+            # Check if customers made purchases in this period
+            period_customers = df[
+                (df['customer_id'].isin(cohort_customers)) &
+                (df['order_date'] >= period_start) &
+                (df['order_date'] <= period_end)
+            ]['customer_id'].unique()
+            
+            # Calculate retention rate
+            retention_rate = len(period_customers) / cohort_size * 100
+            
+            # Calculate average purchase value for retained customers
+            if len(period_customers) > 0:
+                period_purchases = df[
+                    (df['customer_id'].isin(period_customers)) &
+                    (df['order_date'] >= period_start) &
+                    (df['order_date'] <= period_end)
+                ]
+                avg_purchase_value = period_purchases['order_value'].mean()
+            else:
+                avg_purchase_value = 0
+            
+            # Store results
+            retention_rates.loc[cohort, period_name] = retention_rate
+            purchase_values.loc[cohort, period_name] = avg_purchase_value
+    
+    return retention_rates, purchase_values
+
+def format_retention_table(retention_rates, purchase_values):
+    """Create a formatted table combining retention rates and purchase values"""
+    formatted_table = pd.DataFrame(index=retention_rates.index, columns=retention_rates.columns)
+    
+    for cohort in retention_rates.index:
+        for period in retention_rates.columns:
+            rate = retention_rates.loc[cohort, period]
+            value = purchase_values.loc[cohort, period]
+            
+            if pd.isna(rate) or rate == 0:
+                formatted_table.loc[cohort, period] = "-"
+            else:
+                formatted_table.loc[cohort, period] = f"{rate:.1f}% (${value:.2f})"
+    
+    return formatted_table
+
+def plot_heatmap(retention_rates, title):
+    """Create a heatmap visualization of retention rates"""
+    plt.figure(figsize=(10, 6))
+    mask = retention_rates.isna()
+    sns.heatmap(retention_rates, annot=True, fmt=".1f", cmap="YlGnBu", 
+                cbar_kws={'label': 'Retention Rate (%)'}, mask=mask)
+    plt.title(title, fontsize=16)
+    plt.ylabel('Cohort Campaign')
+    plt.xlabel('Retention Campaign Period')
+    plt.tight_layout()
+    return plt
+
+def main():
+    st.title("📊 Customer Cohort Analysis Dashboard")
+    st.markdown("Analyze customer retention rates and purchase values across campaign periods")
+    
+    # File upload
+    uploaded_file = st.sidebar.file_uploader(
+        "Upload your Shopify data (CSV)", 
+        type=['csv'],
+        help="CSV should contain columns: customer_id, order_date, order_value, first_order_date"
+    )
+    
+    # Load data
+    df = load_data(uploaded_file)
+    
+    if df is not None:
+        st.sidebar.markdown("---")
+        st.sidebar.markdown("### Data Overview")
+        st.sidebar.write(f"Total orders: {len(df):,}")
+        st.sidebar.write(f"Unique customers: {df['customer_id'].nunique():,}")
+        st.sidebar.write(f"Date range: {df['order_date'].min().date()} to {df['order_date'].max().date()}")
+        
+        # Define campaigns
+        campaigns = define_campaigns()
+        
+        if st.sidebar.button("Run Analysis", type="primary"):
+            with st.spinner("Analyzing data..."):
+                # Assign cohorts
+                df_with_cohorts = assign_cohorts(df, campaigns)
+                
+                # Calculate retention
+                retention_rates, purchase_values = calculate_retention(df_with_cohorts, campaigns)
+                
+                # Format combined table
+                combined_table = format_retention_table(retention_rates, purchase_values)
+                
+                # Display results
+                st.markdown("### Cohort Analysis Results")
+                st.dataframe(combined_table, use_container_width=True)
+                
+                # Visualizations
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    st.markdown("#### Retention Rates Heatmap")
+                    retention_plot = plot_heatmap(retention_rates, "Customer Retention Rates by Cohort")
+                    st.pyplot(retention_plot)
+                
+                with col2:
+                    st.markdown("#### Average Purchase Values Heatmap")
+                    purchase_plot = plot_heatmap(purchase_values, "Average Purchase Values by Cohort")
+                    st.pyplot(purchase_plot)
+                
+                # Additional metrics
+                st.markdown("### Key Metrics")
+                col1, col2, col3 = st.columns(3)
+                
+                overall_retention = retention_rates.replace(0, np.nan).mean().mean()
+                col1.metric("Average Retention Rate", f"{overall_retention:.1f}%")
+                
+                avg_purchase = purchase_values.replace(0, np.nan).mean().mean()
+                col2.metric("Average Purchase Value", f"${avg_purchase:.2f}")
+                
+                cohort_sizes = df_with_cohorts.groupby('cohort')['customer_id'].nunique()
+                col3.metric("Largest Cohort Size", f"{cohort_sizes.max():,} customers")
+                
+                # Data download
+                st.markdown("### Export Results")
+                
+                # Convert data to CSV
+                retention_csv = retention_rates.to_csv()
+                purchase_csv = purchase_values.to_csv()
+                
+                col1, col2 = st.columns(2)
+                col1.download_button(
+                    label="Download Retention Data (CSV)",
+                    data=retention_csv,
+                    file_name="retention_rates.csv",
+                    mime="text/csv"
+                )
+                
+                col2.download_button(
+                    label="Download Purchase Values (CSV)",
+                    data=purchase_csv,
+                    file_name="purchase_values.csv",
+                    mime="text/csv"
+                )
+
+if __name__ == "__main__":
+    main()
