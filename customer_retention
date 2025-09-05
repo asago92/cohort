@@ -5,6 +5,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from datetime import datetime, timedelta
 import io
+import random
 
 # Set page configuration
 st.set_page_config(
@@ -24,36 +25,55 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-def generate_sample_data():
-    """Generate sample data if no file is uploaded"""
+def generate_sample_data(num_customers=5000, num_orders=40000):
+    """Generate sample Shopify data for demonstration"""
+    # Set random seed for reproducibility
     np.random.seed(42)
-    n_orders = 10000  # Smaller sample for demo
     
     # Generate customer IDs
-    customer_ids = [f"C{10000 + i}" for i in range(2000)]
+    customer_ids = [f'CUST_{i:06d}' for i in range(1, num_customers + 1)]
     
-    # Generate dates for the last 24 months
+    # Generate first order dates for each customer (spread over 24 months)
     end_date = datetime.now()
-    start_date = end_date - timedelta(days=730)
-    date_range = pd.date_range(start=start_date, end=end_date, freq='D')
+    start_date = end_date - timedelta(days=730)  # 24 months
     
-    # Create orders
+    # Create a list to store all orders
     orders = []
-    for i in range(n_orders):
-        customer_id = np.random.choice(customer_ids)
-        order_date = np.random.choice(date_range)
-        order_value = round(np.random.lognormal(mean=3.5, sigma=1.2), 2)
-        orders.append([customer_id, order_date, order_value])
+    
+    # For each customer, generate their first order and potentially subsequent orders
+    for cust_id in customer_ids:
+        # First order date (spread over the 24 month period)
+        first_order_date = start_date + timedelta(
+            days=random.randint(0, 730)
+        )
+        
+        # Determine if this customer will make repeat purchases
+        is_repeat_customer = random.random() < 0.35  # 35% of customers make repeat purchases
+        
+        # Generate first order
+        first_order_value = round(np.random.lognormal(mean=4.0, sigma=0.8), 2)
+        orders.append([cust_id, first_order_date, first_order_value, first_order_date])
+        
+        # Generate subsequent orders if applicable
+        if is_repeat_customer:
+            # Number of additional orders (1 to 5)
+            num_additional_orders = random.randint(1, 5)
+            
+            for _ in range(num_additional_orders):
+                # Time between orders (15 to 180 days)
+                days_between = random.randint(15, 180)
+                order_date = first_order_date + timedelta(days=days_between)
+                
+                # Only include if within our 24 month window
+                if order_date <= end_date:
+                    order_value = round(np.random.lognormal(mean=4.2, sigma=0.7), 2)
+                    orders.append([cust_id, order_date, order_value, first_order_date])
     
     # Create DataFrame
-    df = pd.DataFrame(orders, columns=['customer_id', 'order_date', 'order_value'])
+    df = pd.DataFrame(orders, columns=['customer_id', 'order_date', 'order_value', 'first_order_date'])
     
-    # Calculate first order date for each customer
-    first_orders = df.groupby('customer_id')['order_date'].min().reset_index()
-    first_orders.columns = ['customer_id', 'first_order_date']
-    
-    # Merge with original data
-    df = pd.merge(df, first_orders, on='customer_id')
+    # Sort by order date
+    df = df.sort_values('order_date')
     
     return df
 
@@ -81,8 +101,18 @@ def load_data(uploaded_file):
             st.error(f"Error reading file: {e}")
             return None
     else:
-        st.info("Using sample data. Upload a file to use your own data.")
-        return generate_sample_data()
+        # Show option to generate sample data
+        if st.sidebar.button("Generate Sample Data"):
+            with st.spinner("Generating sample data..."):
+                df = generate_sample_data(num_customers=8000, num_orders=40000)
+                st.session_state.sample_data = df
+                st.success("Sample data generated successfully!")
+                return df
+        elif 'sample_data' in st.session_state:
+            return st.session_state.sample_data
+        else:
+            st.info("Upload a file or click 'Generate Sample Data' to get started.")
+            return None
 
 def define_campaigns():
     """UI for defining campaign date ranges"""
@@ -91,16 +121,31 @@ def define_campaigns():
     campaigns = []
     n_campaigns = st.sidebar.number_input("Number of campaigns", min_value=1, max_value=12, value=3)
     
+    # Default campaign dates (starting from 18 months ago)
+    default_dates = [
+        (datetime.now() - timedelta(days=540), datetime.now() - timedelta(days=450)),  # 18-15 months ago
+        (datetime.now() - timedelta(days=360), datetime.now() - timedelta(days=270)),  # 12-9 months ago
+        (datetime.now() - timedelta(days=180), datetime.now() - timedelta(days=90))    # 6-3 months ago
+    ]
+    
     for i in range(n_campaigns):
         st.sidebar.markdown(f"**Campaign {i+1}**")
         col1, col2 = st.sidebar.columns(2)
+        
+        # Use default dates if available, otherwise calculate based on current date
+        if i < len(default_dates):
+            default_start, default_end = default_dates[i]
+        else:
+            default_start = datetime.now() - timedelta(days=30*(i+6))
+            default_end = datetime.now() - timedelta(days=30*(i+3))
+            
         with col1:
             start = st.date_input(f"Start {i+1}", 
-                                 value=datetime.now() - timedelta(days=30*(i+2)),
+                                 value=default_start,
                                  key=f"start_{i}")
         with col2:
             end = st.date_input(f"End {i+1}", 
-                               value=datetime.now() - timedelta(days=30*(i+1)),
+                               value=default_end,
                                key=f"end_{i}")
         campaigns.append((start, end))
     
